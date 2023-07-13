@@ -3,7 +3,6 @@ package cli
 import (
 	"encoding/json"
 	"log"
-	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/rubenvanstaden/crypto"
@@ -30,6 +29,8 @@ type Connection struct {
 	// Write request from channel to connected relay socket.
 	reqStream chan nostr.MessageReq
 
+	okStream chan nostr.MessageOk
+
 	// Complete close connection
 	done chan struct{}
 }
@@ -45,6 +46,7 @@ func NewConnection(addr string) *Connection {
 		subscriptions: make(map[string]*Subscription),
 		eventStream:   make(chan nostr.MessageEvent),
 		reqStream:     make(chan nostr.MessageReq),
+		okStream:      make(chan nostr.MessageOk),
 		done:          make(chan struct{}),
 	}
 }
@@ -123,6 +125,7 @@ func (s *Connection) Listen() error {
 			case "OK":
 				ok := msg.(*nostr.MessageOk)
 				log.Printf("OK: %v, message: %s", ok.Ok, ok.Message)
+				s.okStream <- *ok
 
 			// Close is end of new events.
 			case "EOSE":
@@ -138,7 +141,7 @@ func (s *Connection) Listen() error {
 
 // Publish events to remote relays.
 // Sign event before publishing
-func (s *Connection) Publish(ev nostr.Event) (nostr.Status, error) {
+func (s *Connection) Publish(ev nostr.Event) (*nostr.MessageOk, error) {
 
 	// TODO: Maybe fix this
 	event := nostr.MessageEvent{
@@ -157,11 +160,20 @@ func (s *Connection) Publish(ev nostr.Event) (nostr.Status, error) {
 	// We have to sign last, since the signature is dependent on the event content.
 	event.Sign(sk)
 
-	s.eventStream <- event
+	go func() {
+		s.eventStream <- event
+	}()
 
-    time.Sleep(2*time.Second)
-
-	return nostr.StatusOK, nil
+	for {
+		select {
+		case <-s.done:
+			return nil, nil
+		case msg := <-s.okStream:
+			if msg.EventId == event.Id {
+				return &msg, nil
+			}
+		}
+	}
 }
 
 func (s *Connection) Subscribe(filters nostr.Filters) (*Subscription, error) {
